@@ -1,0 +1,133 @@
+---
+  trigger: none
+  
+  resources:
+    repositories:
+      - repository: templates
+        type: git
+        name: alzdm/alzdm-mgmt-templates
+
+  parameters:
+    - name: application_landing_zone_config
+      displayName: Application Landing Zone Configuration
+      type: string
+    - name: terraform_action
+      displayName: Terraform Action to perform
+      type: string
+      default: 'apply'
+      values:
+        - 'apply'
+        - 'destroy'
+    - name: terraform_cli_version
+      displayName: Terraform CLI Version
+      type: string
+      default: 'latest'
+  
+  lockBehavior: sequential
+  
+  stages:
+  - stage: plan
+    displayName: Plan
+    variables:
+      - group: alzdm-mgmt
+      - name: 'selfHostedAgent'
+        value: 'true'
+    jobs:
+      - deployment: plan
+        displayName: Plan with Terraform
+        pool:
+          name: alzdm-mgmt
+        environment: alzdm-mgmt-plan
+        timeoutInMinutes: 0
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: Checkout Terraform Module
+                - template: .pipelines/helpers/terraform-installer.yaml@templates
+                  parameters:
+                    terraformVersion: ${{ parameters.terraform_cli_version }}
+                - template: .pipelines/helpers/terraform-init.yaml@templates
+                  parameters:
+                    serviceConnection: 'sc-alzdm-mgmt-plan'
+                    backendAzureResourceGroupName: $(BACKEND_AZURE_RESOURCE_GROUP_NAME)
+                    backendAzureStorageAccountName: $(BACKEND_AZURE_STORAGE_ACCOUNT_NAME)
+                    backendAzureStorageAccountContainerName: $(BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME)
+                    backendAzureStorageAccountContainerKeyName: ${{ parameters.application_landing_zone_config }}.tfstate
+                    root_module_folder_relative_path: .
+                - template: .pipelines/helpers/terraform-plan.yaml@templates
+                  parameters:
+                    terraform_action: ${{ parameters.terraform_action }}
+                    serviceConnection: 'sc-alzdm-mgmt-plan'
+                    root_module_folder_relative_path: .
+                    tfvars: ./config/${{ parameters.application_landing_zone_config }}.tfvars
+                - task: CopyFiles@2
+                  displayName: Create Module Artifact
+                  inputs:
+                    SourceFolder: '$(Build.SourcesDirectory)'
+                    Contents: |
+                      **/*
+                      !.terraform/**/*
+                      !.git/**/*
+                      !.pipelines/**/*
+                      !**/.terraform/**/*
+                      !**/.git/**/*
+                      !**/.pipelines/**/*
+                    TargetFolder: '$(Build.ArtifactsStagingDirectory)'
+                    CleanTargetFolder: true
+                    OverWrite: true
+                - task: PublishPipelineArtifact@1
+                  displayName: Publish Module Artifact
+                  inputs:
+                    targetPath: '$(Build.ArtifactsStagingDirectory)'
+                    artifact: 'module'
+                    publishLocation: 'pipeline'
+                - pwsh: |
+                    terraform `
+                    -chdir="." `
+                    show `
+                    tfplan
+                  displayName: Show the Plan for Review
+  - stage: apply
+    displayName: Apply
+    dependsOn: plan
+    variables:
+      - group: alzdm-mgmt
+      - name: 'selfHostedAgent'
+        value: 'true'
+    jobs:
+      - deployment: apply
+        displayName: Apply with Terraform
+        pool:
+          name: alzdm-mgmt
+        environment: alzdm-mgmt-apply
+        timeoutInMinutes: 0
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: none
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download Module Artifact
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'module'
+                    targetPath: '$(Build.SourcesDirectory)'
+                - template: .pipelines/helpers/terraform-installer.yaml@templates
+                  parameters:
+                    terraformVersion: ${{ parameters.terraform_cli_version }}
+                - template: .pipelines/helpers/terraform-init.yaml@templates
+                  parameters:
+                    serviceConnection: 'sc-alzdm-mgmt-apply'
+                    backendAzureResourceGroupName: $(BACKEND_AZURE_RESOURCE_GROUP_NAME)
+                    backendAzureStorageAccountName: $(BACKEND_AZURE_STORAGE_ACCOUNT_NAME)
+                    backendAzureStorageAccountContainerName: $(BACKEND_AZURE_STORAGE_ACCOUNT_CONTAINER_NAME)
+                    backendAzureStorageAccountContainerKeyName: ${{ parameters.application_landing_zone_config }}.tfstate
+                    root_module_folder_relative_path: .
+                - template: .pipelines/helpers/terraform-apply.yaml@templates
+                  parameters:
+                    terraform_action: ${{ parameters.terraform_action }}
+                    serviceConnection: 'sc-alzdm-mgmt-apply'
+                    root_module_folder_relative_path: .
+  
