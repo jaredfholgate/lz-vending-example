@@ -1,0 +1,103 @@
+trigger:
+  - none
+ 
+parameters:
+  - name: subscription
+    type: string
+    default: ''
+ 
+variables:
+- group: terraform-state
+- group: hub-network
+ 
+stages:
+- stage: plan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: plan
+    displayName: 'Terraform Init and Plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: TerraformInstaller@1
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: 'latest'
+ 
+    - task: TerraformTask@5
+      displayName: Run Terraform Init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        backendServiceArm: '${{ service-connection-name-read }}'
+        backendAzureRmStorageAccountName: $(backend-storage-account-name)
+        backendAzureRmContainerName: $(backend-storage-account-container-name)
+        backendAzureRmKey: '${{ parameters.subscription }}.tfstate'
+ 
+    - task: TerraformTask@5
+      name: terraformPlan
+      displayName: Run Terraform Plan
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        commandOptions: '-var "hub_virtual_network_id=$(hub-virtual-network-id)" -var-file ./config/${{ parameters.subscription }}.tfvars -out tfplan'
+        environmentServiceNameAzureRM: '${{ service-connection-name-read }}'
+ 
+    - task: CopyFiles@2
+      displayName: Create Module Artifact
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)'
+        Contents: |
+          **/*
+          !.terraform/**/*
+          !.git/**/*
+          !**/.terraform/**/*
+          !**/.git/**/*
+        TargetFolder: '$(Build.ArtifactsStagingDirectory)'
+        CleanTargetFolder: true
+        OverWrite: true
+ 
+    - task: PublishPipelineArtifact@1
+      displayName: Publish Module Artifact
+      inputs:
+        targetPath: '$(Build.ArtifactsStagingDirectory)'
+        artifact: 'terraformModule'
+        publishLocation: 'pipeline'
+ 
+- stage: apply
+  displayName: 'Terraform Apply'
+  jobs:
+  - job: apply
+    displayName: 'Terraform Init and Apply'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Module Artifact
+      inputs:
+        source: 'current'
+        artifactName: 'terraformModule'
+        targetPath: '$(Build.SourcesDirectory)'
+ 
+    - task: TerraformInstaller@1
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: 'latest'
+ 
+    - task: TerraformTask@5
+      displayName: Run Terraform Init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        backendServiceArm: '${{ service-connection-name-write }}'
+        backendAzureRmStorageAccountName: $(storage-account-name)
+        backendAzureRmContainerName: $(storage-account-container-name)
+        backendAzureRmKey: '${{ parameters.subscription }}.tfstate'
+ 
+    - task: TerraformTask@5
+      displayName: Run Terraform Apply
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        commandOptions: 'tfplan'
+        environmentServiceNameAzureRM: '${{ service-connection-name-write }}'
