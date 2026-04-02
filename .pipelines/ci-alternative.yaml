@@ -1,0 +1,99 @@
+trigger:
+  - none
+ 
+parameters:
+  - name: subscription
+    type: string
+    default: detected
+ 
+variables:
+- group: terraform-state
+- group: hub-network
+ 
+stages:
+- stage: plan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: findChanges
+    displayName: 'Find Changes'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+      fetchDepth: 0
+      persistCredentials: true
+ 
+    - pwsh: |
+        $subscription = '${{ parameters.subscription }}'
+        if ($subscription -eq "") {
+          $subscription = "detected"
+        }
+        $changes = @{}
+        if ($subscription -eq 'detected') {
+          $files = (git diff origin/main --name-only) -split "`n"
+          write-output ("Changed files: " + $files)
+          $files = $files | Where-Object { $_ -like "config/**" }
+            foreach ($file in $files) {
+            $parts = $file -split "/"
+            $sub = $parts[1] -replace "\.tfvars\.json$",""
+            if (-not $changes.ContainsKey($sub)) {
+              $changes[$sub] = @{}
+            }
+            $changes[$sub] += @{
+              subscription = $sub
+            }
+          }
+         
+        } else {
+          $changes = @{
+            $subscription = @{
+              subscription = $subscription
+            }
+          }
+        }
+        $changes = ConvertTo-Json $changes -Compress
+        $changes = $changes.Replace("{}", "[]")
+        echo "##vso[task.setvariable variable=changes;isOutput=true]$changes"
+        Write-Output ("Detected changes for subscriptions: " + $changes)
+      name: getChanges
+ 
+  - job: plan
+    dependsOn: findChanges
+    strategy:
+      maxParallel: 3
+      matrix: $[ dependencies.findChanges.outputs['getChanges.changes'] ]
+    displayName: 'Terraform Init and Plan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - pwsh: |
+        $configExists = Test-Path -Path "./config/$(subscription).tfvars"
+        Write-Host "##vso[task.setvariable variable=configExists;]$configExists"
+ 
+    - task: TerraformInstaller@1
+      condition: eq(variables['configExists'], 'True')
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: 'latest'
+ 
+    - task: TerraformTask@5
+      condition: eq(variables['configExists'], 'True')
+      displayName: Run Terraform Init
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        backendServiceArm: 'S{{ service-connection-name-read }}'
+        backendAzureRmStorageAccountName: $(storage-account-name)
+        backendAzureRmContainerName: $(storage-account-container-name)
+        backendAzureRmKey: '$(subscription).tfstate'
+   
+    - task: TerraformTask@5
+      condition: eq(variables['configExists'], 'True')
+      name: terraformPlan
+      displayName: Run Terraform Plan
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        commandOptions: '-var "hub_virtual_network_id=$(hub-virtual-network-id)" -var-file ./config/$(subscription).tfvars.json -out tfplan'
+        environmentServiceNameAzureRM: 'S{{ service-connection-name-read }}'
+ 
